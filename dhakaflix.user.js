@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         IMDb / Letterboxd → DhakaFlix Search
 // @namespace    dhakaflix-search
-// @version      8.1
-// @description  Detect movie category and open the appropriate DhakaFlix search page.
+// @version      9.0
+// @description  Detect movie category and automatically search the title on the required DhakaFlix pages.
 // @author       cthboss001
 //
 // Source sites
@@ -26,6 +26,9 @@
 
     // ============================================================
     // CATEGORY CONFIG
+    //
+    // English and Animation have TWO search pages.
+    // All other categories have ONE search page.
     // ============================================================
 
     const CATEGORIES = {
@@ -127,7 +130,7 @@
     }
 
     // ============================================================
-    // METADATA EXTRACTION
+    // IMDb METADATA
     // ============================================================
 
     function getIMDbMetadata() {
@@ -143,7 +146,6 @@
                 'script[type="application/ld+json"]'
             )
             .forEach(script => {
-
                 try {
                     const data =
                         JSON.parse(
@@ -160,7 +162,6 @@
                     }
 
                     if (data.genre) {
-
                         const genres =
                             Array.isArray(
                                 data.genre
@@ -170,14 +171,13 @@
 
                         meta.genres.push(
                             ...genres.map(
-                                x =>
+                                genre =>
                                     String(
-                                        x
+                                        genre
                                     ).toLowerCase()
                             )
                         );
                     }
-
                 } catch (_) {
                     // Ignore malformed JSON-LD
                 }
@@ -185,7 +185,6 @@
 
         const getLinks =
             testid => {
-
                 const li =
                     document.querySelector(
                         `li[data-testid="${testid}"]`
@@ -196,9 +195,7 @@
                 }
 
                 return [
-                    ...li.querySelectorAll(
-                        'a'
-                    )
+                    ...li.querySelectorAll('a')
                 ].map(
                     a =>
                         a.textContent
@@ -222,7 +219,6 @@
             meta.country.length === 0 ||
             meta.language.length === 0
         ) {
-
             document
                 .querySelectorAll(
                     'li.ipc-metadata-list__item, li[class*="metadata-list"]'
@@ -269,6 +265,10 @@
 
         return meta;
     }
+
+    // ============================================================
+    // LETTERBOXD METADATA
+    // ============================================================
 
     function getLetterboxdMetadata() {
         return {
@@ -343,17 +343,19 @@
                 'animation'
             );
 
+        // TV / Web
         if (isTV) {
-
             return isKorea
                 ? CATEGORIES.koreanTV
                 : CATEGORIES.tvWeb;
         }
 
+        // Animation
         if (isAnimation) {
             return CATEGORIES.animation;
         }
 
+        // India
         if (isIndia) {
 
             if (
@@ -375,17 +377,10 @@
                 return CATEGORIES.southIndian;
             }
 
-            if (
-                meta.language.includes(
-                    'hindi'
-                )
-            ) {
-                return CATEGORIES.hindi;
-            }
-
             return CATEGORIES.hindi;
         }
 
+        // English
         if (
             meta.language.length === 0 ||
             meta.language.includes(
@@ -395,27 +390,22 @@
             return CATEGORIES.english;
         }
 
+        // Other foreign language
         return CATEGORIES.foreign;
     }
 
     // ============================================================
-    // OPEN DHAKAFLIX
+    // SOURCE → DHAKAFLIX
+    //
+    // One button click can open multiple pages.
+    // English and Animation = 2 pages.
+    // Everything else = 1 page.
     // ============================================================
 
-    function openCategory(
-        category,
+    function openCategoryPages(
+        pages,
         title
     ) {
-
-        GM_setValue(
-            'DF_PENDING_TITLE',
-            title
-        );
-
-        GM_setValue(
-            'DF_PENDING_TIME',
-            Date.now()
-        );
 
         console.log(
             '[DhakaFlix] Title:',
@@ -423,19 +413,64 @@
         );
 
         console.log(
-            '[DhakaFlix] Opening:',
-            category.label
+            '[DhakaFlix] Opening',
+            pages.length,
+            'search page(s).'
         );
 
-        console.log(
-            '[DhakaFlix] URL:',
-            category.url
-        );
+        pages.forEach(
+            (page, index) => {
 
-        GM_openInTab(
-            category.url,
-            {
-                active: true
+                // Save one search request per tab.
+                const searchId =
+                    `${Date.now()}_${index}_${Math.random()
+                        .toString(36)
+                        .slice(2)}`;
+
+                GM_setValue(
+                    `DF_PENDING_${searchId}`,
+                    {
+                        title,
+                        createdAt:
+                            Date.now()
+                    }
+                );
+
+                GM_setValue(
+                    'DF_LAST_SEARCH_ID',
+                    searchId
+                );
+
+                console.log(
+                    '[DhakaFlix] Opening:',
+                    page.label
+                );
+
+                GM_openInTab(
+                    page.url,
+                    {
+                        active:
+                            index === 0,
+                        insert:
+                            true,
+                        setParent:
+                            true
+                    }
+                );
+
+                /*
+                 * Small delay between opening tabs.
+                 * This helps avoid browser throttling and
+                 * gives each tab its own pending request.
+                 */
+
+                if (
+                    index <
+                    pages.length - 1
+                ) {
+                    // Nothing needed here because GM_openInTab
+                    // returns immediately.
+                }
             }
         );
     }
@@ -445,7 +480,6 @@
     // ============================================================
 
     function isDhakaFlix() {
-
         return (
             location.hostname ===
                 '172.16.50.7' ||
@@ -457,7 +491,64 @@
     }
 
     // ============================================================
-    // RUN INSIDE ACTUAL PAGE CONTEXT
+    // FIND WHICH SEARCH REQUEST BELONGS TO THIS TAB
+    //
+    // Since two pages can open at once, we use the URL as the
+    // identifier and store a short-lived queue.
+    // ============================================================
+
+    function consumePendingSearch() {
+
+        const keys = [
+            'DF_PENDING_SEARCH_1',
+            'DF_PENDING_SEARCH_2',
+            'DF_PENDING_SEARCH_3',
+            'DF_PENDING_SEARCH_4'
+        ];
+
+        /*
+         * Use a queue of pending searches.
+         */
+
+        for (
+            const key of keys
+        ) {
+
+            const data =
+                GM_getValue(
+                    key,
+                    null
+                );
+
+            if (!data) {
+                continue;
+            }
+
+            if (
+                data.createdAt &&
+                Date.now() -
+                    data.createdAt >
+                    120000
+            ) {
+                GM_deleteValue(
+                    key
+                );
+
+                continue;
+            }
+
+            GM_deleteValue(
+                key
+            );
+
+            return data;
+        }
+
+        return null;
+    }
+
+    // ============================================================
+    // PAGE CONTEXT
     // ============================================================
 
     function runInPageContext(
@@ -508,18 +599,21 @@
                     !icon ||
                     !input
                 ) {
-
                     console.error(
-                        '[DhakaFlix] Search elements missing.'
+                        '[DhakaFlix] Search elements not found.'
                     );
 
                     return;
                 }
 
                 /*
-                 * h5ai's actual search implementation
-                 * attaches the click handler to the
-                 * search image.
+                 * This is the exact h5ai search interaction:
+                 *
+                 * 1. Click the search icon.
+                 * 2. Enter title.
+                 * 3. Trigger keyup.
+                 *
+                 * h5ai's own JavaScript handles the search.
                  */
 
                 icon.click();
@@ -538,22 +632,14 @@
                             )?.set;
 
                         if (setter) {
-
                             setter.call(
                                 input,
                                 title
                             );
-
                         } else {
-
                             input.value =
                                 title;
                         }
-
-                        /*
-                         * h5ai listens for keyup and
-                         * performs its own search.
-                         */
 
                         input.dispatchEvent(
                             new KeyboardEvent(
@@ -561,18 +647,28 @@
                                 {
                                     bubbles:
                                         true,
+
                                     cancelable:
                                         true,
+
                                     key:
                                         'Enter',
+
                                     code:
                                         'Enter',
+
                                     keyCode:
                                         13,
+
                                     which:
                                         13
                                 }
                             )
+                        );
+
+                        console.log(
+                            '[DhakaFlix] Searching:',
+                            title
                         );
 
                     },
@@ -590,56 +686,10 @@
 
     function initDhakaFlix() {
 
-        const title =
-            GM_getValue(
-                'DF_PENDING_TITLE',
-                null
-            );
-
-        const timestamp =
-            GM_getValue(
-                'DF_PENDING_TIME',
-                0
-            );
-
-        if (!title) {
-            return;
-        }
-
         /*
-         * Expire old requests.
+         * Because multiple tabs may be opened, use a simple
+         * shared queue stored through GM storage.
          */
-
-        if (
-            timestamp &&
-            Date.now() -
-                timestamp >
-                120000
-        ) {
-
-            GM_deleteValue(
-                'DF_PENDING_TITLE'
-            );
-
-            GM_deleteValue(
-                'DF_PENDING_TIME'
-            );
-
-            return;
-        }
-
-        GM_deleteValue(
-            'DF_PENDING_TITLE'
-        );
-
-        GM_deleteValue(
-            'DF_PENDING_TIME'
-        );
-
-        console.log(
-            '[DhakaFlix] Received title:',
-            title
-        );
 
         let attempts = 0;
 
@@ -660,37 +710,52 @@
                         );
 
                     if (
-                        icon &&
-                        input
+                        !icon ||
+                        !input
                     ) {
+                        if (
+                            attempts >= 30
+                        ) {
+                            clearInterval(
+                                timer
+                            );
 
-                        clearInterval(
-                            timer
-                        );
+                            console.error(
+                                '[DhakaFlix] Search UI not found.'
+                            );
+                        }
+
+                        return;
+                    }
+
+                    clearInterval(
+                        timer
+                    );
+
+                    /*
+                     * Look for a pending title.
+                     */
+
+                    const data =
+                        findPendingTitle();
+
+                    if (!data) {
 
                         console.log(
-                            '[DhakaFlix] Search ready.'
-                        );
-
-                        performH5aiSearch(
-                            title
+                            '[DhakaFlix] No pending search for this page.'
                         );
 
                         return;
                     }
 
-                    if (
-                        attempts >= 30
-                    ) {
+                    console.log(
+                        '[DhakaFlix] Received title:',
+                        data.title
+                    );
 
-                        clearInterval(
-                            timer
-                        );
-
-                        console.error(
-                            '[DhakaFlix] Search UI not found.'
-                        );
-                    }
+                    performH5aiSearch(
+                        data.title
+                    );
 
                 },
                 300
@@ -698,65 +763,135 @@
     }
 
     // ============================================================
-    // BUTTON STYLING
+    // PENDING SEARCH STORAGE
     // ============================================================
 
-    function styleButton(
-        button
+    function findPendingTitle() {
+
+        const candidates = [
+            'DF_PENDING_0',
+            'DF_PENDING_1',
+            'DF_PENDING_2',
+            'DF_PENDING_3'
+        ];
+
+        /*
+         * First check the old single-title key so this remains
+         * compatible with previous versions.
+         */
+
+        const oldTitle =
+            GM_getValue(
+                'DF_PENDING_TITLE',
+                null
+            );
+
+        if (oldTitle) {
+
+            GM_deleteValue(
+                'DF_PENDING_TITLE'
+            );
+
+            GM_deleteValue(
+                'DF_PENDING_TIME'
+            );
+
+            return {
+                title:
+                    oldTitle,
+                createdAt:
+                    Date.now()
+            };
+        }
+
+        for (
+            const key of candidates
+        ) {
+
+            const data =
+                GM_getValue(
+                    key,
+                    null
+                );
+
+            if (!data) {
+                continue;
+            }
+
+            if (
+                data.createdAt &&
+                Date.now() -
+                    data.createdAt >
+                    120000
+            ) {
+
+                GM_deleteValue(
+                    key
+                );
+
+                continue;
+            }
+
+            GM_deleteValue(
+                key
+            );
+
+            return data;
+        }
+
+        return null;
+    }
+
+    // ============================================================
+    // CREATE SEARCH REQUESTS
+    // ============================================================
+
+    function prepareSearchRequests(
+        pages,
+        title
     ) {
 
-        Object.assign(
-            button.style,
-            {
-                padding:
-                    '14px 22px',
+        /*
+         * Clear previous requests.
+         */
 
-                border:
-                    'none',
+        for (
+            let i = 0;
+            i < 4;
+            i++
+        ) {
+            GM_deleteValue(
+                `DF_PENDING_${i}`
+            );
+        }
 
-                borderRadius:
-                    '30px',
+        /*
+         * Create one request for every page.
+         */
 
-                background:
-                    'linear-gradient(135deg, #ff8800, #ff5c00)',
+        pages.forEach(
+            (page, index) => {
 
-                color:
-                    '#fff',
+                GM_setValue(
+                    `DF_PENDING_${index}`,
+                    {
+                        title:
+                            title,
 
-                cursor:
-                    'pointer',
+                        createdAt:
+                            Date.now(),
 
-                fontSize:
-                    '14px',
-
-                fontWeight:
-                    'bold',
-
-                fontFamily:
-                    'Arial, sans-serif',
-
-                boxShadow:
-                    '0 4px 15px rgba(0,0,0,.35)',
-
-                transition:
-                    'transform .15s ease'
+                        url:
+                            page.url
+                    }
+                );
             }
         );
 
-        button.addEventListener(
-            'mouseenter',
-            () => {
-                button.style.transform =
-                    'scale(1.04)';
-            }
-        );
-
-        button.addEventListener(
-            'mouseleave',
-            () => {
-                button.style.transform =
-                    'scale(1)';
-            }
+        console.log(
+            '[DhakaFlix] Prepared',
+            pages.length,
+            'search requests.'
         );
     }
 
@@ -766,15 +901,19 @@
 
     function initSourcePage() {
 
-        let title = null;
+        let title =
+            null;
 
         let meta = {
             type:
                 null,
+
             genres:
                 [],
+
             country:
                 [],
+
             language:
                 []
         };
@@ -813,17 +952,40 @@
                 meta
             );
 
-        /*
-         * Container for multiple buttons.
-         */
+        // ========================================================
+        // One single button
+        // ========================================================
 
-        const wrapper =
+        const button =
             document.createElement(
-                'div'
+                'button'
             );
 
+        /*
+         * For two-page categories:
+         *
+         * DhakaFlix: English Movies ×2
+         *
+         * For one-page categories:
+         *
+         * DhakaFlix: Hindi Movies
+         */
+
+        if (
+            pages.length === 2
+        ) {
+
+            button.textContent =
+                `DhakaFlix: ${pages[0].label} + 1080p`;
+
+        } else {
+
+            button.textContent =
+                `DhakaFlix: ${pages[0].label}`;
+        }
+
         Object.assign(
-            wrapper.style,
+            button.style,
             {
                 position:
                     'fixed',
@@ -837,54 +999,106 @@
                 zIndex:
                     '999999',
 
-                display:
-                    'flex',
+                padding:
+                    '14px 24px',
 
-                flexDirection:
-                    'column',
+                border:
+                    'none',
 
-                gap:
-                    '8px',
+                borderRadius:
+                    '30px',
 
-                alignItems:
-                    'flex-end'
+                background:
+                    'linear-gradient(135deg, #ff8800, #ff5c00)',
+
+                color:
+                    '#fff',
+
+                cursor:
+                    'pointer',
+
+                fontSize:
+                    '15px',
+
+                fontWeight:
+                    'bold',
+
+                fontFamily:
+                    'Arial, sans-serif',
+
+                boxShadow:
+                    '0 4px 15px rgba(0,0,0,.4)',
+
+                transition:
+                    'transform .15s ease'
             }
         );
 
-        pages.forEach(
-            page => {
+        button.addEventListener(
+            'mouseenter',
+            () => {
+                button.style.transform =
+                    'scale(1.04)';
+            }
+        );
 
-                const button =
-                    document.createElement(
-                        'button'
-                    );
+        button.addEventListener(
+            'mouseleave',
+            () => {
+                button.style.transform =
+                    'scale(1)';
+            }
+        );
 
-                button.textContent =
-                    `DhakaFlix: ${page.label}`;
+        button.addEventListener(
+            'click',
+            () => {
 
-                styleButton(
-                    button
+                /*
+                 * Prepare one search request for every target page.
+                 */
+
+                prepareSearchRequests(
+                    pages,
+                    title
                 );
 
-                button.addEventListener(
-                    'click',
-                    () => {
+                /*
+                 * Open every required page.
+                 *
+                 * English = 2 tabs
+                 * Animation = 2 tabs
+                 * Other categories = 1 tab
+                 */
 
-                        openCategory(
-                            page,
-                            title
+                pages.forEach(
+                    page => {
+
+                        console.log(
+                            '[DhakaFlix] Opening:',
+                            page.label
+                        );
+
+                        GM_openInTab(
+                            page.url,
+                            {
+                                active:
+                                    true,
+
+                                insert:
+                                    true,
+
+                                setParent:
+                                    true
+                            }
                         );
                     }
-                );
-
-                wrapper.appendChild(
-                    button
                 );
             }
         );
 
         document.body.appendChild(
-            wrapper
+            button
         );
     }
 
